@@ -1,0 +1,332 @@
+#! /usr/bin/perl
+use strict;
+use warnings;
+
+# generate a consensus fasta file based on input fasta file and SNPs from VCF file
+# Author unknown, script given by Lauren Cowley (drlacowley@gmail.com) on 10/9/2018
+# Edited Mark Maienschein-Cline (mmaiensc@uic.edu) on 10/30/2018:
+#   - add usage statement
+#   - work with tags and variant calls as outputted by freebayes (currently commented-out) or bcftools (active)
+
+# usage
+if( $#ARGV != 2 ){
+	print "Usage: genome.fa gvcf output_pref\n";
+	print "   input should be a GVCF: calls at all positions of the genome, not just SNPs\n";
+	print "   outputs are [pref].fa and [pref].filter.vcf - filtered vcf file\n";
+	print "   output of summary stats is to STDOUT\n";
+	exit;
+}
+
+# use reference sequence to identify the length of the pseudosequence
+
+my $genome_length = `cat $ARGV[0] | grep -v ">"|tr -d "\n"|tr -d "\r" | wc | awk '{print \$3-\$1}' | tr -d "\n"`;
+
+my %pseudosequence;
+my $n = 1;
+
+while ($n <= $genome_length) {
+	$pseudosequence{$n} = "N";
+	$n++;
+}
+
+# parse vcf
+
+my $taxon = $ARGV[1];
+$taxon =~ s/.vcf//g;
+
+open IN, $ARGV[1] or die;
+open(OUT,">$ARGV[2].filter.vcf");
+
+# variable names in bcf file
+
+my $depth = "DP";
+#my $ratio = "DP4"; # change to SRF,SRR,SAF,SAR
+#my $ratio1 = "SRF";
+#my $ratio2 = "SRR";
+#my $ratio3 = "SAF";
+#my $ratio4 = "SAR";
+my $mapping_quality = "MQ"; # average of MQM and MQMR
+#my $mapping_quality1 = "MQM";
+#my $mapping_quality2 = "MQMR";
+my $allele_frequency = "AF1";
+#my $snp_test = "TYPE";
+#my $indel = "TYPE"; # tag to check if it's a snp, indel, etc.
+
+# record errors
+
+my $cov_fail = 0;
+my $strand_cov_fail = 0;
+my $ratio_fail = 0;
+my $mapQ_fail = 0;
+my $baseQ_fail = 0;
+my $allele_freq_fail = 0;
+my $heterozygous_fail = 0;
+my $strand_bias = 0;
+my $baseQ_bias = 0;
+my $mapQ_bias = 0;
+my $tail_dist_bias = 0;
+
+# count SNPs
+
+my $snp_count = 0;
+
+# count analyzed bases
+
+my $analyzed_bases = 0;
+
+# process file
+
+my @seq;
+
+while (my $line = <IN>) {
+	if( $line =~ /^#/ ){
+		print OUT "$line";
+	}
+	
+	unless ($line =~ /^\#/) {
+		
+		my $pass = 1;
+		
+		chomp $line;
+		
+		# parse information
+		
+		my %info;
+		my @data = split(/\s+/,$line);
+		my @info = split(/\;/,$data[7]);
+		
+		my $position = $data[1];
+		
+		foreach my $i (@info) {
+			if ($i =~ /=/) {
+				my @bits = split(/=/,$i);
+				$info{$bits[0]} = $bits[1];
+			} else {
+				$info{$i} = 1;
+			}
+		}
+		
+		# ignore lines dealing with indels (or mnps, complex)
+		
+		#unless (defined($info{$indel}) && $info{$indel} == 1) {
+		#if( defined($info{$indel}) && $info{$indel} eq "snp" ){
+		if( length($data[3]) == 1 && length($data[4]) == 1 && $data[7] !~ /INDEL/ ){
+
+#			# check that ref and alt are the same length
+#			if ( length($data[3]) != length($data[4]) ){
+#				$pass=0;
+#			}
+#			# if ref/alt length is bigger than 1, get rid of the identical bases
+#			# sometimes freebayes reports a SNP with multiple bases, in ref and alt, but only 1 base differs
+#			# e.g.: ref=ATG alt=TTG
+#			if ( length($data[3]) > 1 ){
+#				my $newref = "";
+#				my $newalt = "";
+#				for(my $i=0; $i< length($data[3]); $i++){
+#					if( substr($data[3],$i,1) ne substr($data[4],$i,1) ){
+#						if( $newref ne "" ){
+#							die "Error: SNP call but has multiple positions that differ\n$line\n;";
+#						}
+#						$newref = substr($data[3],$i,1);
+#						$newalt = substr($data[4],$i,1);
+#					}
+#				}
+#				$data[3] = $newref;
+#				$data[4] = $newalt;
+#			}
+	
+			# check depth
+
+			if ($info{$depth} < 5) {
+				$pass = 0;
+				$cov_fail++;
+			}
+							
+			# check base quality
+
+			if ($data[5] < 40) {
+				$pass = 0;
+				$baseQ_fail++;
+			}
+
+			if ($pass == 1) {
+
+				# check mapping quality
+
+				#if ($info{$mapping_quality1} + $info{$mapping_quality2} < 30) {
+				if ($info{$mapping_quality} < 30) {
+					$pass = 0;
+					$mapQ_fail++;
+				}
+				
+				# check per strand mapping
+
+				#my @per_strand = split(/,/,$info{$ratio});
+				#my @per_strand = ($info{$ratio1},$info{$ratio2},$info{$ratio3},$info{$ratio4});
+
+				# tests specific to reference call or SNP call
+
+				if ($data[4] eq '.') {
+
+					# reference call tests
+
+					# check ratios on each strand
+
+#					if (($per_strand[0]+$per_strand[2]) < 2 || ($per_strand[1]+$per_strand[3]) < 2) {
+#						$pass = 0;
+#						$strand_cov_fail++;
+#					}
+#					elsif (($per_strand[0]/($per_strand[0]+$per_strand[2])) < 0.75 || ($per_strand[1]/($per_strand[1]+$per_strand[3])) < 0.75) {
+#						$pass = 0;
+#						$ratio_fail++;
+#					}
+
+					# check allele frequency
+
+					if ($info{$allele_frequency} > 0.05) {
+						$pass = 0;
+						$allele_freq_fail++;
+					}
+
+					
+
+					# add pass to sequence if passes thresholds
+
+					if ($pass == 1) {
+
+						my $base = $data[3];
+						$pseudosequence{$position} = $base;
+						$analyzed_bases++;
+
+					}
+
+				} else {
+
+					# SNP call tests
+					
+					# check on biases
+
+#					if (defined($info{$snp_test})) {
+#
+#						my @tests = split(/,/,$info{$snp_test});
+#
+#						# check strand bias
+#
+#						if ($tests[0] < 0.001) {
+#
+#							$pass = 0;
+#							$strand_bias++;
+#						}
+#
+#						# check base quality bias
+#
+#						if ($tests[1] < 0) {
+#							$pass = 0;
+#							$baseQ_bias++;
+#						}
+#
+#						# check mapping quality bias
+#
+#						if ($tests[2] < 0.001) {
+#							$pass = 0;
+#							$mapQ_bias++;
+#						}
+#
+#						# check tail distance bias
+#
+#						if ($tests[3] < 0.001) {
+#							$pass = 0;
+#							$tail_dist_bias++;
+#						}
+#
+#					}
+				
+					# check ratios on each strand
+
+#					if (($per_strand[0]+$per_strand[2]) < 2 || ($per_strand[1]+$per_strand[3]) < 2) {
+#						$pass = 0;
+#						$strand_cov_fail++;
+#					}
+#					elsif (($per_strand[2]/($per_strand[0]+$per_strand[2])) < 0.75 || ($per_strand[3]/($per_strand[1]+$per_strand[3])) < 0.75) {
+#						$pass = 0;
+#						$ratio_fail++;
+#					}
+
+					# check allele frequency
+
+					if ($info{$allele_frequency} < 0.95) {
+						$pass = 0;
+						$allele_freq_fail++;
+					}
+
+					# check whether SNP call is heterozygous
+					# calling as haploid, can't have heterozygous
+#					if (length($data[4]) > 1 || $data[4] =~ /,/) {
+#						$pass = 0;
+#						$heterozygous_fail++;
+#					}
+
+					# add SNP or ambiguous call to pseudosequence
+
+					if ($pass == 1) {
+						print OUT "$line\n";
+						my $base = $data[4];
+						$pseudosequence{$position} = $base;
+						$analyzed_bases++;
+
+						$snp_count++;
+					}
+
+				}
+			}
+		}
+		
+	}
+}
+close(OUT);
+
+# print pseudosequence
+
+$n = 1;
+
+open(OUT,">$ARGV[2].fa");
+print OUT ">$taxon\n";
+
+while ($n <= $genome_length) {
+	print OUT "$pseudosequence{$n}";
+	if($n%60==0 && $n<$genome_length){print OUT "\n";}
+	$n++;
+}
+
+print OUT "\n";
+close(OUT);
+
+# print stats to STDOUT
+
+my $bases = scalar(keys %pseudosequence);
+
+print "
+Report for $taxon:
+
+Length:	        $bases
+Analyzed bases: $analyzed_bases
+SNPs:	        $snp_count
+
+Ambiguous sites:
+----------------
+Low coverage:		$cov_fail
+Low base quality:	$baseQ_fail
+Low mapping quality:	$mapQ_fail
+Allele frequency fail:	$allele_freq_fail
+
+";
+#SNP call problems
+#-----------------
+#Heterozygous call:	$heterozygous_fail
+#Strand bias:		$strand_bias
+#Base quality bias:	$baseQ_bias
+#Mapping quality bias:	$mapQ_bias
+#Tail distance bias:	$tail_dist_bias
+#Strand coverage low:	$strand_cov_fail
+#Ratio too high:		$ratio_fail
+
