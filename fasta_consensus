@@ -1,7 +1,13 @@
 #!/bin/bash
 # Make a consensus fasta by replacing SNP positions in a reference genome based on read alignments
+# 
+# By:
+# Mark Maienschein-Cline
+# Core for Research Informatics
+# Research Resources Center
 # University of Illinois at Chicago
 # October 30, 2018
+# mmaiensc@uic.edu
 
 set -e
 
